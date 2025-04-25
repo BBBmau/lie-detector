@@ -13,3 +13,7 @@ Below we see a screenshot of the model responding to what's on screen with it's 
 you can run this yourself by simply running `python3 face_reader.py` while also being able to see the exact face that is being analyzed by including the `--debug flag`
 
 ![image](https://github.com/user-attachments/assets/a539a599-e522-403e-98ea-b2384841f9e1)
+
+### Using Gemini
+
+Since this utilizes the Gemini Flash Model you'll need to have a GCP account with the gemini api enabled. You'll provide this in a `.env` file.
