@@ -8,7 +8,7 @@ import google.generativeai as genai
 import os
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QPalette, QColor, QFont
+from PyQt6.QtGui import QPalette, QColor, QFont, QFontMetrics
 from dotenv import load_dotenv
 
 # --- Load .env file ---
@@ -30,7 +30,7 @@ try:
     genai.configure(api_key=api_key)
     # Using a model that supports vision input
     # Adjust model name if needed (e.g., 'gemini-1.5-flash', 'gemini-1.5-pro')
-    genai_model = genai.GenerativeModel('gemini-pro-vision') 
+    genai_model = genai.GenerativeModel('gemini-1.5-flash') 
     print("Google Generative AI configured.")
 except Exception as e:
     print(f"Error configuring Google Generative AI: {e}", file=sys.stderr)
@@ -76,39 +76,33 @@ print("Starting screen capture analysis. Press 'q' to quit.")
 # --- PyQt Application Setup ---
 app = QApplication(sys.argv)
 
-# Get screen geometry
 screen = app.primaryScreen()
 screen_geometry = screen.geometry()
 screen_width = screen_geometry.width()
 screen_height = screen_geometry.height()
 
-# Create a widget to hold the label
 overlay_widget = QWidget()
 overlay_widget.setWindowFlags(
     Qt.WindowType.WindowStaysOnTopHint |
     Qt.WindowType.FramelessWindowHint
 )
-# Make background transparent (or semi-transparent)
-# overlay_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) # Commenting this out
-# For better visibility, let's start with a semi-transparent black background
-overlay_widget.setStyleSheet("background-color: rgba(0, 0, 0, 150); border-radius: 5px;") # Re-enabled stylesheet background
+overlay_widget.setStyleSheet("background-color: rgba(0, 0, 0, 150); border-radius: 5px;") 
 
-# Create the label for emotion text
-emotion_label = QLabel("Emotion: Waiting...", overlay_widget)
+emotion_label = QLabel("Waiting...", overlay_widget) # Initial text short
 emotion_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-emotion_label.setFont(QFont("Arial", 16)) # Adjust font size as needed
+emotion_label.setFont(QFont("Arial", 16)) 
 palette = emotion_label.palette()
-palette.setColor(QPalette.ColorRole.WindowText, QColor("white")) # Set text color
+palette.setColor(QPalette.ColorRole.WindowText, QColor("white"))
 emotion_label.setPalette(palette)
 
-# Position and size the widget/label at the bottom center
-label_width = 300
+# Initial Position and Size (will be adjusted dynamically)
+initial_width = 200 # Start smaller
 label_height = 50
-label_x = (screen_width - label_width) // 2
-label_y = screen_height - label_height - 20 # Position 20px from bottom
+label_x = (screen_width - initial_width) // 2
+label_y = screen_height - label_height - 20
 
-overlay_widget.setGeometry(label_x, label_y, label_width, label_height)
-emotion_label.setGeometry(0, 0, label_width, label_height) # Label fills the widget
+overlay_widget.setGeometry(label_x, label_y, initial_width, label_height)
+emotion_label.setGeometry(0, 0, initial_width, label_height) 
 
 overlay_widget.show()
 # --- End PyQt Application Setup ---
@@ -128,7 +122,7 @@ global_dominant_emotion = "Waiting..."
 # --- Analysis Function (to run periodically) ---
 def analyze_screen():
     global global_dominant_emotion
-    detected_emotion = "Neutral" 
+    detected_text = "Neutral" 
     face_found = False
     largest_face_roi = None 
     
@@ -185,37 +179,36 @@ def analyze_screen():
                     }
                     
                     # Define the prompt
-                    # Keep it simple for reliability
-                    prompt = "Describe the dominant facial emotion shown in this image very concisely (e.g., happy, sad, neutral, angry)."
+                    # *** WARNING: Asking about lying based on an image is highly unreliable and ethically problematic. ***
+                    # *** This is for experimental POC purposes ONLY and should NOT be used for actual judgment. ***
+                    prompt = "Based ONLY on the visual information in this image, are there any cues commonly *misinterpreted* as signs of deception (like nervousness, lack of eye contact)? Answer very concisely."
+                    # --- Alternative prompts (equally unreliable for truthfulness): ---
+                    # prompt = "Analyze the facial expression and body language in this image. Does it appear tense or relaxed?"
+                    # prompt = "Describe any noticeable micro-expressions or deviations from a neutral expression."
+                    # prompt = "Is the person in the image making direct eye contact?"
                     
                     contents = [image_part, prompt]
                     
-                    # --- Make API Call ---
-                    # print("[Debug] Sending request to Gemini API...") # Uncomment for debug
                     response = genai_model.generate_content(contents)
-                    # print("[Debug] Gemini API Response:", response.text) # Uncomment for debug
                     
-                    # Parse response (simple text extraction)
-                    # Add more robust parsing if needed based on actual responses
-                    detected_emotion = response.text.strip() if response.text else "API No Text"
+                    detected_text = response.text.strip() if response.text else "API No Text"
                     
                 except Exception as e:
                     print(f"[Error] Gemini API call failed: {e}") 
-                    detected_emotion = f"API Error"
+                    detected_text = f"API Error"
             else:
-                 detected_emotion = "Invalid ROI"
+                 detected_text = "Invalid ROI"
             # --- End Gemini API Analysis --- 
 
         else:
-            # No face detected 
-            detected_emotion = "No Face"
+            detected_text = "No Face"
             if args.debug:
                 clear_frame = np.zeros((150, 150, 3), dtype=np.uint8) 
                 cv2.imshow(roi_window_name, clear_frame)
 
     except mss.ScreenShotError as ex:
         print(f"Error capturing screen: {ex}", file=sys.stderr)
-        detected_emotion = "Capture Error"
+        detected_text = "Capture Error"
         time.sleep(0.5)
     except KeyboardInterrupt:
         print("Ctrl+C detected, exiting...")
@@ -223,15 +216,34 @@ def analyze_screen():
         sys.exit(0) 
     except Exception as e:
         print(f"An unexpected error occurred during analysis: {e}", file=sys.stderr)
-        detected_emotion = "Analysis Error"
+        detected_text = "Analysis Error"
 
-    global_dominant_emotion = detected_emotion
-    emotion_label.setText(f"Emotion: {global_dominant_emotion}")
+    global_dominant_emotion = detected_text
+    full_text_to_display = f"Result: {global_dominant_emotion}"
     
-    # --- IMPORTANT: Allow OpenCV GUI to process events --- 
-    # Still needed even if no window is visible for internal processing
+    # --- Update Label Text and Adjust Size --- 
+    emotion_label.setText(full_text_to_display)
+    
+    # Calculate required width for the new text
+    font_metrics = QFontMetrics(emotion_label.font())
+    text_width = font_metrics.boundingRect(full_text_to_display).width()
+    
+    padding = 40 # Add horizontal padding
+    new_width = text_width + padding
+    
+    # Optional: Cap the maximum width
+    max_width = screen_width * 0.8 # Don't exceed 80% of screen width
+    new_width = min(new_width, int(max_width))
+    
+    # Recalculate X position to keep it centered
+    new_x = (screen_width - new_width) // 2
+    
+    # Apply new geometry to the overlay widget and the label inside
+    overlay_widget.setGeometry(new_x, label_y, new_width, label_height)
+    emotion_label.setGeometry(0, 0, new_width, label_height) # Make label fill the widget
+    # --- End Update Label Text and Adjust Size --- 
+    
     cv2.waitKey(1) 
-    # ---
 
 # --- Timer to run analysis periodically ---
 # Analyze every 2000ms (2 seconds) for POC to reduce API calls
