@@ -4,10 +4,16 @@ import numpy as np
 import mss
 import time
 import argparse
-from deepface import DeepFace
+import google.generativeai as genai
+import os
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPalette, QColor, QFont
+from dotenv import load_dotenv
+
+# --- Load .env file ---
+load_dotenv()
+# ---
 
 # --- Argument Parser Setup ---
 parser = argparse.ArgumentParser(description='Screen Face Emotion Analyzer')
@@ -15,6 +21,22 @@ parser.add_argument('--debug', action='store_true',
                     help='Show the detected face ROI in a separate window.')
 args = parser.parse_args()
 # --- End Argument Parser Setup ---
+
+# --- Google AI Setup ---
+try:
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY environment variable not set.")
+    genai.configure(api_key=api_key)
+    # Using a model that supports vision input
+    # Adjust model name if needed (e.g., 'gemini-1.5-flash', 'gemini-1.5-pro')
+    genai_model = genai.GenerativeModel('gemini-pro-vision') 
+    print("Google Generative AI configured.")
+except Exception as e:
+    print(f"Error configuring Google Generative AI: {e}", file=sys.stderr)
+    print("Please ensure the GOOGLE_API_KEY environment variable is set correctly.", file=sys.stderr)
+    sys.exit(1)
+# --- End Google AI Setup ---
 
 # Load a pre-trained Haar Cascade classifier for face detection
 # Make sure you have the 'haarcascade_frontalface_default.xml' file
@@ -106,13 +128,9 @@ global_dominant_emotion = "Waiting..."
 # --- Analysis Function (to run periodically) ---
 def analyze_screen():
     global global_dominant_emotion
-    detected_emotion = "Neutral" # Default if no face found
+    detected_emotion = "Neutral" 
     face_found = False
-    largest_face_roi = None # To store the ROI of the largest face
-    
-    # --- Debugging --- 
-    # print(f"--- Analyzing frame at {time.strftime('%H:%M:%S')} ---")
-    # ---
+    largest_face_roi = None 
     
     try:
         # Capture screen
@@ -142,48 +160,57 @@ def analyze_screen():
                 best_face_coords = (x, y, w, h)
         # --- End Find Largest Face ---
 
-        # --- Debugging --- 
-        # print(f"Faces detected: {len(faces)}. Largest area: {largest_area}")
-        # ---
-
         # Analyze the largest detected face
         if best_face_coords is not None:
             face_found = True
             x, y, w, h = best_face_coords
-            largest_face_roi = frame[y:y+h, x:x+w] # Extract ROI
+            largest_face_roi = frame[y:y+h, x:x+w] 
             
-            # --- Display Face ROI (Conditional) --- 
             if args.debug and largest_face_roi.size > 0: 
                 cv2.imshow(roi_window_name, largest_face_roi)
-            # --- End Display Face ROI ---
 
-            try:
-                # --- Analyze Emotion --- 
-                result = DeepFace.analyze(largest_face_roi, actions=['emotion'], enforce_detection=False, silent=True)
-                # --- End Analyze Emotion --- 
-                
-                # --- Debugging --- 
-                # print(f"DeepFace raw result: {result}")
-                # ---
-                
-                if isinstance(result, list) and len(result) > 0:
-                    detected_emotion = result[0]['dominant_emotion']
-                elif isinstance(result, dict):
-                     detected_emotion = result.get('dominant_emotion', 'N/A')
-                else:
-                    detected_emotion = 'N/A'
-            except ValueError as ve:
-                # print(f"[Debug] DeepFace ValueError: {ve}")
-                detected_emotion = "Invalid ROI"
-            except Exception as e:
-                # print(f"[Debug] DeepFace Exception: {e}") 
-                detected_emotion = "Error" 
+            # --- Gemini API Analysis --- 
+            if largest_face_roi.size > 0:
+                try:
+                    # Encode image to PNG bytes
+                    is_success, buffer = cv2.imencode(".png", largest_face_roi)
+                    if not is_success:
+                        raise ValueError("Failed to encode face ROI to PNG.")
+                    image_bytes = buffer.tobytes()
+                    
+                    # Prepare image part for API
+                    image_part = {
+                        "mime_type": "image/png",
+                        "data": image_bytes
+                    }
+                    
+                    # Define the prompt
+                    # Keep it simple for reliability
+                    prompt = "Describe the dominant facial emotion shown in this image very concisely (e.g., happy, sad, neutral, angry)."
+                    
+                    contents = [image_part, prompt]
+                    
+                    # --- Make API Call ---
+                    # print("[Debug] Sending request to Gemini API...") # Uncomment for debug
+                    response = genai_model.generate_content(contents)
+                    # print("[Debug] Gemini API Response:", response.text) # Uncomment for debug
+                    
+                    # Parse response (simple text extraction)
+                    # Add more robust parsing if needed based on actual responses
+                    detected_emotion = response.text.strip() if response.text else "API No Text"
+                    
+                except Exception as e:
+                    print(f"[Error] Gemini API call failed: {e}") 
+                    detected_emotion = f"API Error"
+            else:
+                 detected_emotion = "Invalid ROI"
+            # --- End Gemini API Analysis --- 
+
         else:
             # No face detected 
             detected_emotion = "No Face"
-            # Optional: Clear the ROI window if no face is found (Conditional)
             if args.debug:
-                clear_frame = np.zeros((150, 150, 3), dtype=np.uint8) # Black frame
+                clear_frame = np.zeros((150, 150, 3), dtype=np.uint8) 
                 cv2.imshow(roi_window_name, clear_frame)
 
     except mss.ScreenShotError as ex:
@@ -207,10 +234,10 @@ def analyze_screen():
     # ---
 
 # --- Timer to run analysis periodically ---
-# Analyze every 500ms (adjust as needed for performance)
+# Analyze every 2000ms (2 seconds) for POC to reduce API calls
 timer = QTimer()
 timer.timeout.connect(analyze_screen)
-timer.start(500) 
+timer.start(2000) # <-- Changed interval to 2 seconds
 
 print("Starting screen analysis for emotion overlay. Press Ctrl+C in terminal to quit.")
 
