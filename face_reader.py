@@ -3,10 +3,18 @@ import sys
 import numpy as np
 import mss
 import time
+import argparse
 from deepface import DeepFace
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPalette, QColor, QFont
+
+# --- Argument Parser Setup ---
+parser = argparse.ArgumentParser(description='Screen Face Emotion Analyzer')
+parser.add_argument('--debug', action='store_true', 
+                    help='Show the detected face ROI in a separate window.')
+args = parser.parse_args()
+# --- End Argument Parser Setup ---
 
 # Load a pre-trained Haar Cascade classifier for face detection
 # Make sure you have the 'haarcascade_frontalface_default.xml' file
@@ -28,11 +36,10 @@ except Exception as e:
     sys.exit(1)
 
 # --- Screen Capture Setup ---
-# Define the screen area to capture (e.g., primary monitor)
-# You can adjust 'top', 'left', 'width', 'height' for a specific region
-# Or use monitor=N for a specific monitor index (usually 1 is primary)
-monitor_definition = {"top": 0, "left": 0, "width": 1920, "height": 1080} # Adjust width/height to your primary monitor resolution if needed
 sct = mss.mss()
+# Use monitor 0 to capture the entire virtual screen (all monitors combined)
+monitor_definition = sct.monitors[0]
+print(f"Capturing entire virtual screen area: {monitor_definition}")
 # --- End Screen Capture Setup ---
 
 # Start video capture from the default webcam (usually index 0)
@@ -84,6 +91,15 @@ emotion_label.setGeometry(0, 0, label_width, label_height) # Label fills the wid
 overlay_widget.show()
 # --- End PyQt Application Setup ---
 
+# --- OpenCV Window Setup for ROI (Conditional) ---
+roi_window_name = 'Detected Face ROI'
+if args.debug:
+    print("Debug mode enabled: Showing detected face ROI window.")
+    cv2.namedWindow(roi_window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(roi_window_name, 150, 150) 
+    cv2.moveWindow(roi_window_name, 10, 10) 
+# --- End OpenCV Window Setup ---
+
 # --- Global variable for dominant emotion ---
 global_dominant_emotion = "Waiting..."
 
@@ -92,6 +108,11 @@ def analyze_screen():
     global global_dominant_emotion
     detected_emotion = "Neutral" # Default if no face found
     face_found = False
+    largest_face_roi = None # To store the ROI of the largest face
+    
+    # --- Debugging --- 
+    # print(f"--- Analyzing frame at {time.strftime('%H:%M:%S')} ---")
+    # ---
     
     try:
         # Capture screen
@@ -107,17 +128,44 @@ def analyze_screen():
             gray,
             scaleFactor=1.1,
             minNeighbors=5,
-            minSize=(50, 50) # Slightly larger minSize might improve performance
+            minSize=(50, 50) 
         )
+        
+        # --- Find Largest Face ---
+        largest_area = 0
+        best_face_coords = None
 
-        # Analyze the *first* detected face for simplicity
-        if len(faces) > 0:
+        for (x, y, w, h) in faces:
+            area = w * h
+            if area > largest_area:
+                largest_area = area
+                best_face_coords = (x, y, w, h)
+        # --- End Find Largest Face ---
+
+        # --- Debugging --- 
+        # print(f"Faces detected: {len(faces)}. Largest area: {largest_area}")
+        # ---
+
+        # Analyze the largest detected face
+        if best_face_coords is not None:
             face_found = True
-            (x, y, w, h) = faces[0]
-            face_roi = frame[y:y+h, x:x+w]
+            x, y, w, h = best_face_coords
+            largest_face_roi = frame[y:y+h, x:x+w] # Extract ROI
             
+            # --- Display Face ROI (Conditional) --- 
+            if args.debug and largest_face_roi.size > 0: 
+                cv2.imshow(roi_window_name, largest_face_roi)
+            # --- End Display Face ROI ---
+
             try:
-                result = DeepFace.analyze(face_roi, actions=['emotion'], enforce_detection=False, silent=True)
+                # --- Analyze Emotion --- 
+                result = DeepFace.analyze(largest_face_roi, actions=['emotion'], enforce_detection=False, silent=True)
+                # --- End Analyze Emotion --- 
+                
+                # --- Debugging --- 
+                # print(f"DeepFace raw result: {result}")
+                # ---
+                
                 if isinstance(result, list) and len(result) > 0:
                     detected_emotion = result[0]['dominant_emotion']
                 elif isinstance(result, dict):
@@ -125,26 +173,38 @@ def analyze_screen():
                 else:
                     detected_emotion = 'N/A'
             except ValueError as ve:
-                # Handle case where face ROI is too small or invalid for DeepFace
-                # print(f"DeepFace error: {ve}")
-                detected_emotion = "Invalid ROI" # Or keep previous emotion
+                # print(f"[Debug] DeepFace ValueError: {ve}")
+                detected_emotion = "Invalid ROI"
             except Exception as e:
-                # print(f"Error analyzing face: {e}")
-                detected_emotion = "Error" # Or keep previous emotion
+                # print(f"[Debug] DeepFace Exception: {e}") 
+                detected_emotion = "Error" 
         else:
-            # No face detected, keep emotion as Neutral or previous?
+            # No face detected 
             detected_emotion = "No Face"
+            # Optional: Clear the ROI window if no face is found (Conditional)
+            if args.debug:
+                clear_frame = np.zeros((150, 150, 3), dtype=np.uint8) # Black frame
+                cv2.imshow(roi_window_name, clear_frame)
 
     except mss.ScreenShotError as ex:
         print(f"Error capturing screen: {ex}", file=sys.stderr)
+        detected_emotion = "Capture Error"
         time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("Ctrl+C detected, exiting...")
+        cv2.destroyAllWindows() # Clean up OpenCV window
+        sys.exit(0) 
     except Exception as e:
         print(f"An unexpected error occurred during analysis: {e}", file=sys.stderr)
-        # Potentially stop the timer or handle differently
-        detected_emotion = "Capture Error"
+        detected_emotion = "Analysis Error"
 
     global_dominant_emotion = detected_emotion
     emotion_label.setText(f"Emotion: {global_dominant_emotion}")
+    
+    # --- IMPORTANT: Allow OpenCV GUI to process events --- 
+    # Still needed even if no window is visible for internal processing
+    cv2.waitKey(1) 
+    # ---
 
 # --- Timer to run analysis periodically ---
 # Analyze every 500ms (adjust as needed for performance)
@@ -155,4 +215,6 @@ timer.start(500)
 print("Starting screen analysis for emotion overlay. Press Ctrl+C in terminal to quit.")
 
 # Start the PyQt event loop
-sys.exit(app.exec())
+exit_code = app.exec()
+cv2.destroyAllWindows() # Ensure windows are closed on normal exit too
+sys.exit(exit_code)
